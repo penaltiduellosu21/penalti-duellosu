@@ -54,7 +54,10 @@
     <button data-a="follow">Takip</button>
     <button id="demoBtn">Otomatik demo</button>
     <button id="sndBtn" class="act">Ses: AÇIK (M)</button>
+    <button id="vcBtn" class="act">Anons: AÇIK (V)</button>
+    <button id="vtBtn">Anons testi</button>
   </div>
+  <div id="diag" class="tip" style="color:#ffd23f">Sürüm yükleniyor…</div>
   <div class="tip">Gerçek yayında bu panel, köprü programı bağlanınca kendiliğinden gizlenir. Adres sonuna <b>?obs=1</b> eklersen hiç görünmez.</div>
 </div>
 
@@ -77,6 +80,13 @@ const CFG = {
     return 'ws://localhost:8080' + tail;      // dosyadan açıldıysa bilgisayardaki köprü
   })(),
   obs: new URLSearchParams(location.search).has('obs'),
+  voice: true,              // hediye/gol/kazanan sesli anonsu (V tuşu aç/kapa)
+  voiceRate: 1.05,          // konuşma hızı
+  voiceVolume: 1,           // anons ses seviyesi (0–1)
+  voiceMinCoins: 1,         // en az kaç jetonluk hediye anons edilsin
+  voiceBigGift: 20,         // bu kadar jeton ve üstü "büyük hediye" anonsu alır
+  voiceFollow: true,        // takip edenlere teşekkür etsin mi
+  voiceQueueMax: 4,         // sırada en fazla kaç anons beklesin (fazlası atlanır)
   volume: 0.8,              // genel ses seviyesi (0–1)
   crowdVolume: 0.5,         // arka plandaki tribün uğultusu (0–1)
 };
@@ -227,6 +237,69 @@ const SFX = (() => {
   };
   return api;
 })();
+/* =========================================================
+   SESLİ ANONS — cihazın kendi Türkçe sesiyle konuşur
+   ========================================================= */
+const GIFT_TR = { 'rose':'gül', 'gül':'gül', 'finger heart':'parmak kalp', 'perfume':'parfüm', 'parfüm':'parfüm',
+  'doughnut':'donut', 'tiktok':'TikTok', 'hand hearts':'kalp', 'heart me':'kalp', 'kalp':'kalp',
+  'ice cream cone':'dondurma', 'gg':'ge ge', 'lion':'aslan', 'universe':'evren', 'galaxy':'galaksi' };
+function spokenName(n){
+  let s = String(n || '').normalize('NFC').replace(/[_.\-]+/g, ' ').replace(/[^\p{L}\p{N} ]/gu, '').replace(/\s+/g, ' ').trim();
+  if (s.length > 22) s = s.slice(0, 22);
+  return s || 'bir izleyici';
+}
+const teamWord = t => TEAMS[t].name.toLocaleLowerCase('tr');
+const VOICE = (() => {
+  const ok = 'speechSynthesis' in window;
+  let on = CFG.voice, trVoice = null, speaking = false, unlocked = false, cur = 0, lastErr = '', spoken = 0;
+  const q = [], keep = [];                          // keep: Safari konuşmayı yarıda unutmasın diye referans tutulur
+  function pickVoice(){ if (!ok) return; const vs = speechSynthesis.getVoices(); trVoice = vs.find(v => /^tr/i.test(v.lang)) || null; updateDiag(); }
+  if (ok){ pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+  function speakNow(text, vol){
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'tr-TR'; if (trVoice) u.voice = trVoice;
+    u.rate = CFG.voiceRate; u.volume = vol; u.pitch = 1.05;
+    keep.push(u); if (keep.length > 10) keep.shift();
+    try { if (speechSynthesis.paused) speechSynthesis.resume(); } catch(e){}
+    speechSynthesis.speak(u);
+    return u;
+  }
+  function next(){
+    if (!ok || speaking || !q.length) return;
+    const item = q.shift(), id = ++cur; speaking = true;
+    SFX.crowdLevel(.45, .3);                       // konuşurken tribün kısılır
+    const done = () => { if (id !== cur || !speaking) return; speaking = false; SFX.crowdLevel(1, .8); setTimeout(next, 150); };
+    try {
+      const u = speakNow(item.text, CFG.voiceVolume);
+      u.onstart = () => { spoken++; updateDiag(); };
+      u.onend = done; u.onerror = ev => { lastErr = (ev && ev.error) || 'hata'; updateDiag(); done(); };
+    } catch(e){ lastErr = e.message; updateDiag(); done(); return; }
+    setTimeout(done, 9000);
+  }
+  return {
+    // iPad/iPhone'da konuşma ilk dokunuşla açılır (dokunuşun içinde gerçek bir cümle söylenmeli)
+    unlock(){ if (!ok || unlocked) return; unlocked = true; try { speakNow('.', 0.01); } catch(e){ lastErr = e.message; } updateDiag(); },
+    test(){ if (!ok) return; unlocked = true; try { speechSynthesis.cancel(); speaking = false; speakNow('Ses testi. Bir, iki, üç. Penaltı düellosuna hoş geldiniz!', CFG.voiceVolume).onstart = () => { spoken++; updateDiag(); }; } catch(e){ lastErr = e.message; updateDiag(); } },
+    diag(){ return { ok, tr: trVoice ? trVoice.name : null, n: ok ? speechSynthesis.getVoices().length : 0, unlocked, spoken, lastErr }; },
+    say(text, prio = 1, key = null){
+      if (!ok || !on) return;
+      if (key && q.some(x => x.key === key)) return;
+      q.push({ text, prio, key }); q.sort((a,b) => b.prio - a.prio);
+      while (q.length > CFG.voiceQueueMax) q.pop();   // en önemsizler atlanır
+      next();
+    },
+    toggle(){ on = !on; if (!on && ok){ q.length = 0; speechSynthesis.cancel(); speaking = false; SFX.crowdLevel(1); } return on; },
+    get on(){ return on; },
+  };
+})();
+
+const VERSION = 'v4 · anons';
+function updateDiag(){
+  const el = document.getElementById('diag'); if (!el) return;
+  let d; try { d = VOICE.diag(); } catch(e){ return; }   // VOICE henüz hazır değil
+  el.textContent = `Sürüm: ${VERSION} | Konuşma: ${d.ok ? 'var' : 'YOK'} | Türkçe ses: ${d.tr || (d.n ? 'yok (' + d.n + ' ses)' : 'yükleniyor')} | Açıldı: ${d.unlocked ? 'evet' : 'hayır'} | Konuştu: ${d.spoken}${d.lastErr ? ' | Hata: ' + d.lastErr : ''}`;
+}
+
 // Tarayıcılar sesi ilk tıklamadan önce açmaz; OBS'te otomatik açılır.
 SFX.init();
 addEventListener('pointerdown', () => SFX.init());
@@ -309,6 +382,13 @@ function handleEvent(e){
     p.coins += coins;
     addPower(p.team, coins * CFG.powerPerCoin);
     SFX.gift(coins >= 20);
+    const nm = spokenName(p.nick), gn = GIFT_TR[String(e.gift||'').toLocaleLowerCase('tr')], cnt = e.count || 1;
+    if (coins >= CFG.goldenCoins && !S.golden[p.team])
+      VOICE.say(`Altın top! ${nm} altın topu verdi! ${teamWord(p.team)} takımının sıradaki şutu kesin gol!`, 3);
+    else if (coins >= CFG.voiceBigGift)
+      VOICE.say(`Vay be! ${nm}, ${cnt > 1 ? cnt + ' tane ' : ''}${gn || 'hediye'} gönderdi! ${teamWord(p.team)} takımı güçleniyor!`, 2, 'g:' + e.user);
+    else if (coins >= CFG.voiceMinCoins)
+      VOICE.say(`${nm}, ${gn ? gn + ' için ' : ''}teşekkürler!`, 1, 'g:' + e.user);
     if (coins >= CFG.goldenCoins && !S.golden[p.team]){
       S.golden[p.team] = true; SFX.golden();
       addFeed(`${short(p.nick)} ALTIN TOP verdi! Sıradaki şut kesin gol`, p.team);
@@ -322,6 +402,7 @@ function handleEvent(e){
   else if (e.type === 'follow'){
     if (p.team === null) joinTeam(p);
     addPower(p.team, CFG.powerPerFollow);
+    if (CFG.voiceFollow) VOICE.say(`${spokenName(p.nick)}, takip ettiğin için teşekkürler!`, 0, 'f:' + e.user);
     addFeed(`${short(p.nick)} takip etti  +${CFG.powerPerFollow} güç`, p.team);
   }
 }
@@ -370,7 +451,8 @@ function finishShot(){
   const a = S.turn, sh = S.shot, scored = sh.outcome === 'goal';
   S.taken[a]++; S.hist[a].push(scored);
   if (S.shooter && !S.shooter.bot){ S.shooter.shots++; if (scored) S.shooter.goals++; }
-  if (scored){ S.score[a]++; burst(a); S.shake = 18; S.flash = 1; SFX.goal(sh.golden); }
+  if (scored){ S.score[a]++; burst(a); S.shake = 18; S.flash = 1; SFX.goal(sh.golden);
+    if (S.shooter && !S.shooter.bot) VOICE.say(`Gol! ${spokenName(S.shooter.nick)} attı!`, 2); }
   else if (sh.outcome === 'save'){ SFX.save(); SFX.crowdLevel(1); }
   else { SFX.miss(sh.post); SFX.crowdLevel(1); }
 }
@@ -413,6 +495,7 @@ function update(dt){
         S.mvp = best ? best.nick : null;
         S.phase = 'end'; burst(S.winner); burst(S.winner);
         setTimeout(() => { SFX.whistle(3); SFX.win(); }, 900);
+        VOICE.say(`Maç bitti! ${teamWord(S.winner)} takımı kazandı!${S.mvp ? ' Maçın yıldızı ' + spokenName(S.mvp) + '!' : ''}`, 3);
       } else {
         S.turn = 1 - S.turn; S.shooter = chooseShooter(S.turn); S.phase = 'intro';
       }
@@ -792,7 +875,7 @@ let wakeLock = null;
 async function keepAwake(){
   try { if ('wakeLock' in navigator && !wakeLock){ wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch(e){}
 }
-['pointerdown','touchend','click'].forEach(ev => addEventListener(ev, () => { SFX.init(); keepAwake(); }, { passive:true }));
+['pointerdown','touchend','click'].forEach(ev => addEventListener(ev, () => { SFX.init(); VOICE.unlock(); keepAwake(); }, { passive:true }));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
 keepAwake();
 if (location.protocol.startsWith('http')) setInterval(() => fetch('/ping', { cache:'no-store' }).catch(()=>{}), 4*60*1000);
@@ -830,11 +913,18 @@ document.getElementById('hideBtn').onclick = () => panel.classList.add('hidden')
 const sndBtn = document.getElementById('sndBtn');
 function toggleSound(){ const on = SFX.toggle(); sndBtn.textContent = `Ses: ${on ? 'AÇIK' : 'KAPALI'} (M)`; sndBtn.classList.toggle('act', on); }
 sndBtn.onclick = toggleSound;
+const vcBtn = document.getElementById('vcBtn');
+function toggleVoice(){ const on = VOICE.toggle(); vcBtn.textContent = `Anons: ${on ? 'AÇIK' : 'KAPALI'} (V)`; vcBtn.classList.toggle('act', on); }
+vcBtn.onclick = toggleVoice;
+document.getElementById('vtBtn').onclick = () => { SFX.init(); VOICE.test(); };
+updateDiag(); setInterval(updateDiag, 2000);
+if (!CFG.voice){ vcBtn.textContent = 'Anons: KAPALI (V)'; vcBtn.classList.remove('act'); }
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT') return;
   if (e.key === 'h' || e.key === 'H') panel.classList.toggle('hidden');
   if (e.key === 'd' || e.key === 'D') toggleDemo(!demo);
   if (e.key === 'm' || e.key === 'M') toggleSound();
+  if (e.key === 'v' || e.key === 'V') toggleVoice();
 });
 </script>
 </body>
