@@ -1,0 +1,841 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Penaltı">
+<meta name="theme-color" content="#05080a">
+<title>Penaltı Düellosu</title>
+<style>
+  html,body{margin:0;height:100%;background:#05080a;overflow:hidden;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+  canvas{display:block}
+  #panel{position:fixed;top:10px;right:10px;width:280px;background:rgba(15,20,25,.94);color:#e8edf2;border:1px solid #2c3742;border-radius:12px;padding:10px;font-size:13px;z-index:5;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  #panel.hidden{display:none}
+  #panel .hd{display:flex;align-items:center;gap:6px;margin-bottom:8px;font-weight:700}
+  #panel .hd span{font-weight:500;font-size:11px;padding:2px 6px;border-radius:6px;background:#3a2020;color:#ff9b9b}
+  #panel .hd span.on{background:#163a22;color:#7dffa6}
+  #panel .hd button{margin-left:auto}
+  #panel .lbl{font-size:11px;color:#8a99a8;margin:8px 0 4px;text-transform:uppercase;letter-spacing:.05em}
+  #panel .row{display:flex;flex-wrap:wrap;gap:5px}
+  #panel button{background:#24303b;color:#e8edf2;border:1px solid #33414e;border-radius:7px;padding:6px 8px;font-size:12px;cursor:pointer}
+  #panel button:hover{background:#2f3e4c}
+  #panel button.act{background:#1f5f3a;border-color:#2f8a55}
+  #panel input{width:100%;box-sizing:border-box;background:#0d1217;color:#e8edf2;border:1px solid #33414e;border-radius:7px;padding:6px 8px;font-size:12px}
+  #panel .tip{font-size:11px;color:#8a99a8;margin-top:8px;line-height:1.4}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1080" height="1920"></canvas></div>
+
+<div id="panel">
+  <div class="hd">Test paneli <span id="wsStat">bağlantı yok</span><button id="hideBtn">Gizle (H)</button></div>
+  <div class="lbl">İzleyici adı</div>
+  <input id="nick" placeholder="boş bırakırsan rastgele isim">
+  <div class="lbl">Yorum</div>
+  <div class="row">
+    <button data-a="chat|1">"1" yaz</button>
+    <button data-a="chat|2">"2" yaz</button>
+    <button data-a="chat|katıl">"katıl" yaz</button>
+  </div>
+  <div class="lbl">Hediye</div>
+  <div class="row">
+    <button data-a="gift|Gül|1">Gül · 1</button>
+    <button data-a="gift|Kalp|5">Kalp · 5</button>
+    <button data-a="gift|Parfüm|20">Parfüm · 20</button>
+    <button data-a="gift|Büyük hediye|100">Büyük · 100</button>
+  </div>
+  <div class="lbl">Diğer</div>
+  <div class="row">
+    <button data-a="like|25">25 beğeni</button>
+    <button data-a="follow">Takip</button>
+    <button id="demoBtn">Otomatik demo</button>
+    <button id="sndBtn" class="act">Ses: AÇIK (M)</button>
+  </div>
+  <div class="tip">Gerçek yayında bu panel, köprü programı bağlanınca kendiliğinden gizlenir. Adres sonuna <b>?obs=1</b> eklersen hiç görünmez.</div>
+</div>
+
+<script>
+/* =========================================================
+   AYARLAR — buradan oyunu kolayca değiştirebilirsin
+   ========================================================= */
+const CFG = {
+  shotsPerTeam: 5,          // her takım kaç penaltı atar (sonra seri penaltı / altın gol)
+  powerPerCoin: 5,          // 1 jetonluk hediye kaç güç verir (güç 0–100)
+  powerPerLike: 0.3,        // 1 beğeni kaç güç verir
+  powerPerFollow: 10,       // takip kaç güç verir
+  goldenCoins: 99,          // tek seferde bu kadar jetonluk hediye = ALTIN TOP (kesin gol)
+  baseGoalChance: 0.62,     // iki takımın gücü eşitken gol olasılığı
+  wsUrl: (() => {
+    const q = new URLSearchParams(location.search), u = q.get('kullanici');
+    if (q.get('ws')) return q.get('ws');
+    const tail = u ? '/?kullanici=' + encodeURIComponent(u) : '/';
+    if (location.protocol.startsWith('http')) return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + tail;
+    return 'ws://localhost:8080' + tail;      // dosyadan açıldıysa bilgisayardaki köprü
+  })(),
+  obs: new URLSearchParams(location.search).has('obs'),
+  volume: 0.8,              // genel ses seviyesi (0–1)
+  crowdVolume: 0.5,         // arka plandaki tribün uğultusu (0–1)
+};
+
+/* =========================================================
+   SESLER — hepsi kodla üretilir (dosya gerekmez, telif yok).
+   Kendi sesini kullanmak istersen "sesler" klasörüne şu adlarla
+   .mp3 koy, otomatik onu çalar:
+   duduk, sut, gol, kurtardi, aut, direk, hediye, katil, altin, kazandi, tribun
+   ========================================================= */
+const SFX = (() => {
+  let ac = null, master = null, crowdGain = null, noiseBuf = null, on = true, lastGift = 0;
+  const files = {};
+  const NAMES = ['duduk','sut','gol','kurtardi','aut','direk','hediye','katil','altin','kazandi','tribun'];
+  for (const n of NAMES){
+    const a = new Audio(); a.preload = 'auto';
+    a.oncanplaythrough = () => { files[n] = a; if (n === 'tribun' && ac) startCrowd(); };
+    a.onerror = () => {};
+    a.src = `sesler/${n}.mp3`;
+  }
+
+  function init(){
+    if (ac){ if (ac.state === 'suspended') ac.resume(); return; }
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    master = ac.createGain(); master.gain.value = CFG.volume; master.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate*2, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i=0;i<d.length;i++) d[i] = Math.random()*2-1;
+    startCrowd();
+  }
+  const ready = () => ac && ac.state === 'running' && on;
+  function playFile(n, vol=1){
+    const f = files[n]; if (!f || !on) return false;
+    const a = f.cloneNode(); a.volume = clamp(vol*CFG.volume,0,1); a.play().catch(()=>{}); return true;
+  }
+
+  /* temel parçalar */
+  function noise({ dur=.5, type='bandpass', f=1000, f2=null, q=1, gain=.3, att=.01, rel=null, delay=0 }){
+    const t = ac.currentTime + delay, src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    const fl = ac.createBiquadFilter(); fl.type = type; fl.frequency.setValueAtTime(f, t); fl.Q.value = q;
+    if (f2) fl.frequency.exponentialRampToValueAtTime(f2, t+dur);
+    const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t+att);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + (rel ?? dur));
+    src.connect(fl).connect(g).connect(master); src.start(t); src.stop(t + (rel ?? dur) + .05);
+  }
+  function tone({ type='sine', f=440, f2=null, dur=.2, gain=.2, att=.005, delay=0, vib=0 }){
+    const t = ac.currentTime + delay, o = ac.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, t);
+    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t+dur);
+    if (vib){ const l = ac.createOscillator(), lg = ac.createGain(); l.frequency.value = vib; lg.gain.value = f*.04; l.connect(lg).connect(o.frequency); l.start(t); l.stop(t+dur+.05); }
+    const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(gain, t+att); g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    o.connect(g).connect(master); o.start(t); o.stop(t+dur+.05);
+  }
+  function crowdSwell(peak, hold, f=900){   // tribün coşkusu / "ooo"
+    noise({ dur: hold, type:'bandpass', f, q:.6, gain: peak, att:.25, rel: hold + 1.4 });
+    noise({ dur: hold, type:'bandpass', f: f*2.2, q:.8, gain: peak*.45, att:.3, rel: hold + 1.1 });
+  }
+
+  /* arka plan uğultusu */
+  function startCrowd(){
+    if (!ac) return;
+    if (files.tribun){
+      if (crowdGain && crowdGain.stop) crowdGain.stop();
+      const a = files.tribun; a.loop = true; a.volume = clamp(CFG.crowdVolume*CFG.volume,0,1); a.play().catch(()=>{});
+      crowdGain = { file:a, stop(){} }; return;
+    }
+    if (crowdGain) return;
+    const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    const f1 = ac.createBiquadFilter(); f1.type = 'bandpass'; f1.frequency.value = 520; f1.Q.value = .5;
+    const f2 = ac.createBiquadFilter(); f2.type = 'lowpass'; f2.frequency.value = 1800;
+    crowdGain = ac.createGain(); crowdGain.gain.value = .05 * CFG.crowdVolume;
+    const lfo = ac.createOscillator(), lg = ac.createGain(); lfo.frequency.value = .23; lg.gain.value = .015*CFG.crowdVolume;
+    lfo.connect(lg).connect(crowdGain.gain); lfo.start();
+    src.connect(f1).connect(f2).connect(crowdGain).connect(master); src.start();
+  }
+  function crowdLevel(level, time=.6){   // 1 = normal
+    if (!ac || !crowdGain) return;
+    if (crowdGain.file){ crowdGain.file.volume = clamp(CFG.crowdVolume*CFG.volume*level,0,1); return; }
+    crowdGain.gain.cancelScheduledValues(ac.currentTime);
+    crowdGain.gain.setTargetAtTime(.05*CFG.crowdVolume*level, ac.currentTime, time/3);
+  }
+
+  /* oyun sesleri */
+  const api = {
+    init,
+    get on(){ return on; },
+    get locked(){ return !ac || ac.state !== 'running'; },
+    toggle(){ on = !on; if (master) master.gain.value = on ? CFG.volume : 0; if (crowdGain && crowdGain.file) on ? crowdGain.file.play() : crowdGain.file.pause(); return on; },
+    crowdLevel,
+    whistle(times=1){
+      if (!ready() || playFile('duduk')) return;
+      for (let i=0;i<times;i++){
+        const long = i === times-1 && times > 1, d = i*.42;
+        tone({ type:'sine', f:2900, dur: long ? .75 : .28, gain:.16, att:.02, vib:38, delay:d });
+        noise({ type:'bandpass', f:2900, q:6, dur: long ? .75 : .28, gain:.05, delay:d });
+      }
+    },
+    kick(){
+      if (!ready() || playFile('sut')) return;
+      tone({ f:160, f2:45, dur:.16, gain:.7 });
+      noise({ type:'highpass', f:1500, dur:.05, gain:.25 });
+    },
+    goal(golden){
+      if (!ready()) return;
+      crowdLevel(2.2, .3); setTimeout(() => crowdLevel(1, 2), 2600);
+      if (playFile('gol')) return;
+      noise({ type:'highpass', f:2500, f2:900, dur:.35, gain:.22 });   // file sesi
+      crowdSwell(.55, 1.6, 950);
+      if (golden) api.golden(.15);
+    },
+    save(){
+      if (!ready() || playFile('kurtardi')) return;
+      tone({ f:220, f2:90, dur:.12, gain:.5 });                         // eldiven
+      noise({ type:'bandpass', f:900, f2:380, q:.7, dur:1.3, gain:.28, att:.2 });   // "ooo"
+    },
+    miss(post){
+      if (!ready()) return;
+      if (post && !playFile('direk')){
+        for (const [f,g] of [[523,.25],[1347,.14],[2213,.08],[3100,.04]]) tone({ type:'sine', f, dur:1.1, gain:g });
+      }
+      if (playFile('aut')) return;
+      noise({ type:'bandpass', f:1000, f2:350, q:.7, dur:1.4, gain:.3, att:.25 });
+    },
+    gift(big){
+      if (!ready()) return;
+      const now = performance.now(); if (now - lastGift < 120) return; lastGift = now;
+      if (playFile('hediye', big ? 1 : .7)) return;
+      const notes = big ? [784,988,1175,1568] : [1047,1568];
+      notes.forEach((f,i) => tone({ type:'triangle', f, dur:.25, gain: big ? .18 : .11, delay:i*.07 }));
+    },
+    join(){
+      if (!ready() || playFile('katil', .6)) return;
+      tone({ type:'sine', f:520, f2:880, dur:.1, gain:.12 });
+    },
+    golden(delay=0){
+      if (!ready() || (delay===0 && playFile('altin'))) return;
+      [523,659,784,1047,1319,1568].forEach((f,i) => tone({ type:'triangle', f, dur:.4, gain:.15, delay: delay + i*.08 }));
+      noise({ type:'highpass', f:6000, dur:1, gain:.06, att:.1, delay });
+    },
+    win(){
+      if (!ready()) return;
+      crowdLevel(2.5, .3); setTimeout(() => crowdLevel(1, 3), 5000);
+      if (playFile('kazandi')) return;
+      crowdSwell(.5, 3, 900);
+      const seq = [[523,.18],[659,.18],[784,.18],[1047,.5],[784,.18],[1047,.8]];
+      let d = .9; for (const [f,len] of seq){ tone({ type:'square', f, dur:len, gain:.06, delay:d }); tone({ type:'triangle', f:f/2, dur:len, gain:.12, delay:d }); d += len*.9; }
+    },
+  };
+  return api;
+})();
+// Tarayıcılar sesi ilk tıklamadan önce açmaz; OBS'te otomatik açılır.
+SFX.init();
+addEventListener('pointerdown', () => SFX.init());
+addEventListener('keydown', () => SFX.init());
+const TEAMS = [
+  { name:'KIRMIZI', color:'#ef3b4a', dark:'#9b1825', light:'#ff8a94', keys:['1','kırmızı','kirmizi'] },
+  { name:'MAVİ',    color:'#2f86ff', dark:'#1748a6', light:'#8fbcff', keys:['2','mavi'] },
+];
+
+/* ========================================================= */
+const W = 1080, H = 1920;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const FONT = '"Arial Black","Segoe UI Black",Impact,system-ui,sans-serif';
+
+// Ekran 9:16'dan genişse (iPad gibi) saha yanlara uzar, siyah boşluk kalmaz.
+let CW = W, OX = 0;
+function fit(){
+  const ar = innerWidth / innerHeight;
+  CW = CFG.obs ? W : Math.round(Math.max(W, Math.min(1500, H * ar)));
+  OX = (CW - W) / 2;
+  if (cv.width !== CW) cv.width = CW;
+  const s = Math.min(innerWidth / CW, innerHeight / H);
+  cv.style.width = (CW*s) + 'px'; cv.style.height = (H*s) + 'px';
+}
+addEventListener('resize', fit); fit();
+
+const rnd = (a,b) => a + Math.random()*(b-a);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const lerp = (a,b,t) => a + (b-a)*t;
+const ease = t => t<.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
+const pick = arr => arr[Math.floor(Math.random()*arr.length)];
+const short = (s,n=14) => (s||'').length > n ? s.slice(0,n-1)+'…' : (s||'');
+
+/* ---------------- oyun durumu ---------------- */
+const players = new Map();          // kullanıcı -> {nick, team, goals, shots, coins}
+const S = {
+  match: 1, firstTeam: 0, turn: 0,
+  score: [0,0], taken: [0,0], hist: [[],[]],
+  power: [0,0], golden: [false,false],
+  phase: 'kickoff', t: 0,
+  shooter: null, shot: null, winner: null, mvp: null,
+  feed: [], particles: [], shake: 0, flash: 0,
+};
+let botNo = 1;
+
+function teamCount(i){ let n=0; for (const p of players.values()) if (p.team===i) n++; return n; }
+
+function getPlayer(user, nick){
+  let p = players.get(user);
+  if (!p){ p = { nick: nick||user, team: null, goals:0, shots:0, coins:0, lastShot:0 }; players.set(user,p); }
+  if (nick) p.nick = nick;
+  return p;
+}
+function joinTeam(p, team){
+  if (p.team !== null) return false;
+  if (team === undefined) team = teamCount(0) <= teamCount(1) ? 0 : 1;
+  p.team = team;
+  SFX.join();
+  addFeed(`${short(p.nick)} ${TEAMS[team].name} takımına katıldı`, team);
+  return true;
+}
+function addFeed(text, team){
+  S.feed.unshift({ text, team, t: performance.now() });
+  if (S.feed.length > 6) S.feed.pop();
+}
+function addPower(team, amount){ S.power[team] = clamp(S.power[team] + amount, 0, 100); }
+
+/* ---------------- gelen olaylar ---------------- */
+function handleEvent(e){
+  const p = getPlayer(e.user, e.nick);
+  if (e.type === 'chat'){
+    const txt = (e.text||'').trim().toLocaleLowerCase('tr');
+    const t = TEAMS.findIndex(T => T.keys.includes(txt));
+    if (t >= 0) joinTeam(p, t);
+    else if (txt === 'katıl' || txt === 'katil') joinTeam(p);
+  }
+  else if (e.type === 'gift'){
+    if (p.team === null) joinTeam(p);
+    const coins = Math.max(1, (e.coins||1) * (e.count||1));
+    p.coins += coins;
+    addPower(p.team, coins * CFG.powerPerCoin);
+    SFX.gift(coins >= 20);
+    if (coins >= CFG.goldenCoins && !S.golden[p.team]){
+      S.golden[p.team] = true; SFX.golden();
+      addFeed(`${short(p.nick)} ALTIN TOP verdi! Sıradaki şut kesin gol`, p.team);
+    } else {
+      addFeed(`${short(p.nick)}: ${e.gift||'hediye'} x${e.count||1}  +${Math.round(coins*CFG.powerPerCoin)} güç`, p.team);
+    }
+  }
+  else if (e.type === 'like'){
+    if (p.team !== null) addPower(p.team, (e.count||1) * CFG.powerPerLike);
+  }
+  else if (e.type === 'follow'){
+    if (p.team === null) joinTeam(p);
+    addPower(p.team, CFG.powerPerFollow);
+    addFeed(`${short(p.nick)} takip etti  +${CFG.powerPerFollow} güç`, p.team);
+  }
+}
+
+/* ---------------- maç akışı ---------------- */
+const DUR = { kickoff:3, intro:1.5, runup:.7, shot:.62, result:1.9, end:7 };
+const GOAL = { l:250, r:830, top:520, bot:800 };
+const SPOT = { x:540, y:1270 };
+
+function chooseShooter(team){
+  const list = [...players.values()].filter(p => p.team === team);
+  if (!list.length) return { nick: `Oyuncu ${botNo++ % 99 || 1}`, team, bot:true, goals:0, shots:0 };
+  list.sort((a,b) => a.lastShot - b.lastShot || Math.random()-.5);
+  const p = list[0]; p.lastShot = performance.now();
+  return p;
+}
+
+function planShot(){
+  const a = S.turn, d = 1 - a;
+  let p = clamp(CFG.baseGoalChance + 0.004*(S.power[a] - S.power[d]), 0.2, 0.95);
+  let golden = false;
+  if (S.golden[a]){ p = 1; golden = true; S.golden[a] = false; }
+  const goal = Math.random() < p;
+  const side = pick([-1,-1,0,1,1]);
+  let tx = side === 0 ? rnd(470,610) : 540 + side*rnd(150,245);
+  let ty = rnd(575,765);
+  let kx, outcome;
+  if (goal){
+    outcome = 'goal';
+    if (side !== 0 && Math.random() < .4) kx = tx - side*rnd(110,150);   // doğru köşe ama yetişemedi
+    else kx = 540 + (side === 0 ? pick([-1,1]) : -side) * rnd(170,215);
+  } else if (Math.random() < .72){
+    outcome = 'save'; kx = tx;
+  } else {
+    outcome = 'miss';
+    if (Math.random() < .5){ ty = rnd(430,490); }                       // üstten aut
+    else { tx = 540 + (side||pick([-1,1])) * rnd(320,380); }            // yandan aut
+    kx = 540 + (side||pick([-1,1])) * rnd(120,200);
+  }
+  S.shot = { outcome, golden, from:{x:SPOT.x,y:SPOT.y}, to:{x:tx,y:ty}, kx, ky:ty, side: Math.sign(tx-540) || 1,
+             post: outcome === 'miss' && ty >= GOAL.top && Math.random() < .5 };
+  S.power[a] *= .5;  S.power[d] *= .85;   // güç harcanır, yeni hediye teşvik edilir
+}
+
+function finishShot(){
+  const a = S.turn, sh = S.shot, scored = sh.outcome === 'goal';
+  S.taken[a]++; S.hist[a].push(scored);
+  if (S.shooter && !S.shooter.bot){ S.shooter.shots++; if (scored) S.shooter.goals++; }
+  if (scored){ S.score[a]++; burst(a); S.shake = 18; S.flash = 1; SFX.goal(sh.golden); }
+  else if (sh.outcome === 'save'){ SFX.save(); SFX.crowdLevel(1); }
+  else { SFX.miss(sh.post); SFX.crowdLevel(1); }
+}
+
+function decided(){
+  const n = CFG.shotsPerTeam, [s0,s1] = S.score, [t0,t1] = S.taken;
+  if (t0 <= n && t1 <= n){
+    if (s0 + (n-t0) < s1 || s1 + (n-t1) < s0) return true;
+    if (t0 === n && t1 === n) return s0 !== s1;
+    return false;
+  }
+  return t0 === t1 && s0 !== s1;
+}
+
+function nextMatch(){
+  S.match++; S.firstTeam = 1 - S.firstTeam; S.turn = S.firstTeam;
+  S.score = [0,0]; S.taken = [0,0]; S.hist = [[],[]];
+  S.power = S.power.map(v => v*.3); S.winner = null; S.mvp = null;
+  S.phase = 'kickoff'; S.t = 0;
+}
+
+function update(dt){
+  S.t += dt;
+  S.shake = Math.max(0, S.shake - dt*40);
+  S.flash = Math.max(0, S.flash - dt*1.6);
+  for (const q of S.particles){ q.x += q.vx*dt; q.y += q.vy*dt; q.vy += 900*dt; q.r += q.vr*dt; q.life -= dt; }
+  S.particles = S.particles.filter(q => q.life > 0);
+
+  if (S.t < DUR[S.phase]) return;
+  S.t = 0;
+  switch (S.phase){
+    case 'kickoff': S.shooter = chooseShooter(S.turn); S.phase = 'intro'; break;
+    case 'intro':   planShot(); S.phase = 'runup'; SFX.whistle(); SFX.crowdLevel(1.6, .7); break;
+    case 'runup':   S.phase = 'shot'; SFX.kick(); SFX.crowdLevel(.6, .2); break;
+    case 'shot':    finishShot(); S.phase = 'result'; break;
+    case 'result':
+      if (decided()){
+        S.winner = S.score[0] > S.score[1] ? 0 : 1;
+        const best = [...players.values()].filter(p => p.team === S.winner).sort((a,b) => b.goals - a.goals)[0];
+        S.mvp = best ? best.nick : null;
+        S.phase = 'end'; burst(S.winner); burst(S.winner);
+        setTimeout(() => { SFX.whistle(3); SFX.win(); }, 900);
+      } else {
+        S.turn = 1 - S.turn; S.shooter = chooseShooter(S.turn); S.phase = 'intro';
+      }
+      break;
+    case 'end': nextMatch(); break;
+  }
+}
+
+function burst(team){
+  const cols = [TEAMS[team].color, TEAMS[team].light, '#ffffff', '#ffd23f'];
+  for (let i=0;i<110;i++) S.particles.push({
+    x: rnd(GOAL.l, GOAL.r), y: rnd(GOAL.top-40, GOAL.top+80),
+    vx: rnd(-420,420), vy: rnd(-900,-250), r: rnd(0,6), vr: rnd(-8,8),
+    w: rnd(10,20), h: rnd(6,12), c: pick(cols), life: rnd(1.2,2.4),
+  });
+}
+
+/* ---------------- çizim yardımcıları ---------------- */
+function txt(s, x, y, size, color, align='center', stroke=0){
+  ctx.font = `900 ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (stroke){ ctx.lineWidth = stroke; ctx.strokeStyle = 'rgba(0,0,0,.75)'; ctx.lineJoin='round'; ctx.strokeText(s,x,y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function rr(x,y,w,h,r){ ctx.beginPath(); ctx.roundRect(x,y,w,h,r); }
+
+/* kalabalık (sabit) */
+const crowd = [];
+for (let row=0; row<9; row++) for (let i=0;i<84;i++){
+  crowd.push({ x: -230 + i*18.5 + (row%2)*9 + rnd(-3,3), y: 318 + row*19 + rnd(-2,2),
+    c: pick(['#ef3b4a','#ef3b4a','#2f86ff','#2f86ff','#e9edf2','#ffd23f','#3b4652']), ph: rnd(0,6.28) });
+}
+
+function drawBackground(now){
+  const L = -OX - 30, FW = CW + 60;   // tam genişlik (iPad'de yanlara taşar)
+  let g = ctx.createLinearGradient(0,0,0,500);
+  g.addColorStop(0,'#081320'); g.addColorStop(1,'#15263a');
+  ctx.fillStyle = g; ctx.fillRect(L,0,FW,500);
+  // ışıklar
+  for (const lx of [120, 960]){
+    const lg = ctx.createRadialGradient(lx,300,0,lx,300,260);
+    lg.addColorStop(0,'rgba(255,255,230,.22)'); lg.addColorStop(1,'rgba(255,255,230,0)');
+    ctx.fillStyle = lg; ctx.fillRect(lx-260,40,520,520);
+  }
+  // tribün
+  ctx.fillStyle = '#1b2633'; ctx.fillRect(L,305,FW,180);
+  const jump = (S.phase==='result' && S.shot && S.shot.outcome==='goal') || S.phase==='end';
+  for (const c of crowd){
+    const dy = jump ? Math.abs(Math.sin(now/110 + c.ph))*-7 : Math.sin(now/700 + c.ph)*1.2;
+    ctx.fillStyle = c.c; ctx.beginPath(); ctx.arc(c.x, c.y+dy, 6.5, 0, 6.283); ctx.fill();
+  }
+  // reklam panosu
+  g = ctx.createLinearGradient(0,478,0,505);
+  g.addColorStop(0,'#10161d'); g.addColorStop(1,'#1d2833');
+  ctx.fillStyle = g; ctx.fillRect(L,478,FW,30);
+  ctx.globalAlpha = .55;
+  for (let x=L-((now/12)%360); x<L+FW; x+=360) txt('PENALTI DÜELLOSU  •  CANLI', x, 494, 18, '#9fb3c8', 'left');
+  ctx.globalAlpha = 1;
+
+  // çim — perspektifli şeritler
+  let y = 508, i = 0;
+  while (y < H){
+    const h = 28 + (y-508)*.13;
+    ctx.fillStyle = i%2 ? '#2f8f3c' : '#36a046';
+    ctx.fillRect(L, y, FW, h + 1); y += h; i++;
+  }
+  // gölgelendirme
+  g = ctx.createLinearGradient(0,508,0,H);
+  g.addColorStop(0,'rgba(0,0,0,.25)'); g.addColorStop(.4,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,0,.35)');
+  ctx.fillStyle = g; ctx.fillRect(L,508,FW,H-508);
+
+  // saha çizgileri
+  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 5; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(L,GOAL.bot); ctx.lineTo(L+FW,GOAL.bot); ctx.stroke();
+  ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(320,GOAL.bot); ctx.lineTo(250,905); ctx.lineTo(830,905); ctx.lineTo(760,GOAL.bot); ctx.stroke();
+  ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(110,GOAL.bot); ctx.lineTo(-260,1210); ctx.moveTo(970,GOAL.bot); ctx.lineTo(1340,1210); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-260,1210); ctx.lineTo(1340,1210); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,.9)';
+  ctx.beginPath(); ctx.ellipse(SPOT.x, SPOT.y+28, 20, 9, 0, 0, 6.283); ctx.fill();
+}
+
+function drawGoal(now){
+  const {l,r,top,bot} = GOAL, back = { l:l+45, r:r-45, top:top+38, bot:bot-6 };
+  ctx.fillStyle = 'rgba(10,20,15,.35)';
+  ctx.fillRect(back.l, back.top, back.r-back.l, back.bot-back.top);
+  // ağ
+  let bulge = 0, bx = 540, by = 660;
+  if (S.shot && S.shot.outcome==='goal' && (S.phase==='result')){ bulge = Math.max(0, 1 - S.t*1.4); bx = S.shot.to.x; by = S.shot.to.y; }
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1.6;
+  const off = (x,y) => { if (!bulge) return [x,y]; const d = Math.hypot(x-bx,y-by); const k = Math.max(0,1-d/140)*bulge; return [x + (x-bx)*k*.15, y + (y-by)*k*.15 - k*10]; };
+  for (let x=back.l; x<=back.r+1; x+=22){ ctx.beginPath(); for (let y=back.top; y<=back.bot; y+=10){ const [px,py]=off(x,y); y===back.top?ctx.moveTo(px,py):ctx.lineTo(px,py);} ctx.stroke(); }
+  for (let y=back.top; y<=back.bot+1; y+=22){ ctx.beginPath(); for (let x=back.l; x<=back.r; x+=10){ const [px,py]=off(x,y); x===back.l?ctx.moveTo(px,py):ctx.lineTo(px,py);} ctx.stroke(); }
+  // yan ağlar
+  for (let k=0;k<=1;k+=.125){
+    ctx.beginPath(); ctx.moveTo(lerp(l,back.l,k), lerp(top,back.top,k)); ctx.lineTo(lerp(l,back.l,k), lerp(bot,back.bot,k)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lerp(r,back.r,k), lerp(top,back.top,k)); ctx.lineTo(lerp(r,back.r,k), lerp(bot,back.bot,k)); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lerp(l,r,k), top); ctx.lineTo(lerp(back.l,back.r,k), back.top); ctx.stroke();
+  }
+  // direkler
+  ctx.strokeStyle = '#f4f6f8'; ctx.lineWidth = 15; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(l,bot); ctx.lineTo(l,top); ctx.lineTo(r,top); ctx.lineTo(r,bot); ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.18)'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(l+5,bot); ctx.lineTo(l+5,top+6); ctx.lineTo(r-5,top+6); ctx.lineTo(r-5,bot); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
+
+/* basit oyuncu figürü: front=true kaleci (bize bakıyor) */
+function drawPerson(x, y, s, team, opts={}){
+  const T = TEAMS[team], front = !!opts.front, rot = opts.rot||0, pose = opts.pose||0;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(s, s);
+  // gölge
+  if (!opts.noShadow){ ctx.fillStyle='rgba(0,0,0,.28)'; ctx.beginPath(); ctx.ellipse(0,0,40,10,0,0,6.283); ctx.fill(); }
+  const shirt = front ? '#ffd23f' : T.color, shirtDark = front ? '#c9a01c' : T.dark;
+  // bacaklar
+  ctx.strokeStyle = '#e6b98f'; ctx.lineWidth = 13; ctx.lineCap='round';
+  const legA = pose*0.6;
+  ctx.beginPath(); ctx.moveTo(-11,-62); ctx.lineTo(-14 - legA*20, -8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(11,-62); ctx.lineTo(14 + legA*30, -8 - legA*25); ctx.stroke();
+  // çoraplar/kramponlar
+  ctx.strokeStyle = shirtDark; ctx.lineWidth = 14;
+  ctx.beginPath(); ctx.moveTo(-14 - legA*20,-30); ctx.lineTo(-14 - legA*20,-6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(14 + legA*30,-30 - legA*20); ctx.lineTo(14 + legA*30,-6 - legA*25); ctx.stroke();
+  // şort
+  ctx.fillStyle = front ? '#222' : '#f2f2f2'; rr(-24,-80,48,26,6); ctx.fill();
+  // kollar
+  const armUp = opts.armsUp ? 1 : 0;
+  ctx.strokeStyle = shirt; ctx.lineWidth = 12;
+  ctx.beginPath(); ctx.moveTo(-24,-128); ctx.lineTo(-40 - armUp*10, -95 - armUp*75); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(24,-128); ctx.lineTo(40 + armUp*10, -95 - armUp*75); ctx.stroke();
+  if (front){ ctx.fillStyle = '#f2f2f2'; for (const sx of [-1,1]){ ctx.beginPath(); ctx.arc(sx*(40+armUp*10), -95-armUp*75, 9, 0, 6.283); ctx.fill(); } }
+  // gövde
+  ctx.fillStyle = shirt; rr(-27,-140,54,64,12); ctx.fill();
+  ctx.fillStyle = shirtDark; ctx.fillRect(-27,-86,54,8);
+  if (!front && opts.num){ txt(String(opts.num), 0, -112, 26, '#fff'); }
+  // kafa
+  ctx.fillStyle = '#e6b98f'; ctx.beginPath(); ctx.arc(0,-160,19,0,6.283); ctx.fill();
+  ctx.fillStyle = '#3a2516';
+  ctx.beginPath(); front ? ctx.arc(0,-166,19,Math.PI,0) : ctx.arc(0,-161,19.5,Math.PI*.95,Math.PI*2.05); ctx.fill();
+  ctx.restore(); ctx.lineCap='butt';
+}
+
+function drawBall(x, y, r, golden){
+  ctx.save();
+  if (golden){ ctx.shadowColor = '#ffd23f'; ctx.shadowBlur = 30; }
+  ctx.fillStyle = golden ? '#ffd23f' : '#fafafa';
+  ctx.beginPath(); ctx.arc(x,y,r,0,6.283); ctx.fill(); ctx.restore();
+  ctx.fillStyle = golden ? '#b8860b' : '#222';
+  ctx.beginPath();
+  for (let i=0;i<5;i++){ const a = -Math.PI/2 + i*1.2566; const px = x + Math.cos(a)*r*.38, py = y + Math.sin(a)*r*.38; i?ctx.lineTo(px,py):ctx.moveTo(px,py); }
+  ctx.fill();
+  ctx.strokeStyle = golden ? '#b8860b' : '#555'; ctx.lineWidth = Math.max(1, r*.07);
+  ctx.beginPath(); ctx.arc(x,y,r,0,6.283); ctx.stroke();
+}
+
+function drawAction(now){
+  const def = 1 - S.turn, sh = S.shot;
+  // kaleci
+  let kx = 540, ky = GOAL.bot - 4, rot = 0, armsUp = false;
+  let kp = 0;
+  if (sh && (S.phase==='shot' || S.phase==='result')){
+    kp = S.phase==='shot' ? clamp((S.t/DUR.shot - .2)/.8, 0, 1) : 1;
+    kp = ease(kp);
+    const dx = sh.kx - 540;
+    kx = 540 + dx*kp;
+    const lift = Math.abs(dx) > 60 ? clamp((GOAL.bot - sh.ky)/260, 0, 1)*110 : clamp((GOAL.bot-sh.ky)/260,0,1)*70;
+    ky = GOAL.bot - 4 - Math.sin(kp*Math.PI*.85)*lift*.6 - kp*lift*.4;
+    rot = clamp(dx/210, -1, 1) * 1.25 * kp;
+    armsUp = true;
+  } else {
+    kx = 540 + Math.sin(now/380)*14;
+  }
+  drawPerson(kx, ky, 1.05, def, { front:true, rot, armsUp, noShadow: kp>.3 });
+
+  // top
+  let bx = SPOT.x, by = SPOT.y, br = 34, showBall = true;
+  if (sh && S.phase==='shot'){
+    const t = ease(S.t/DUR.shot);
+    bx = lerp(sh.from.x, sh.to.x, t);
+    by = lerp(sh.from.y, sh.to.y, t) - Math.sin(t*Math.PI)*90;
+    br = lerp(34, 15, t);
+  } else if (sh && S.phase==='result'){
+    const t = S.t;
+    if (sh.outcome==='goal'){ bx = sh.to.x; by = Math.min(GOAL.bot-20, sh.to.y + t*t*160); br = 14; }
+    else if (sh.outcome==='save'){ bx = sh.to.x + sh.side*t*520; by = sh.to.y - 200*t + 420*t*t; br = 15 + t*6; }
+    else { const dir = sh.to.y < GOAL.top ? 0 : Math.sign(sh.to.x-540); bx = sh.to.x + dir*t*300; by = sh.to.y - t*260; br = Math.max(4, 15 - t*8); }
+    if (t > 1.3) showBall = false;
+  }
+  const behind = sh && (S.phase==='result') && sh.outcome==='goal';
+  if (showBall && behind){ /* top kalecinin arkasında kalır — zaten kaleci üstte çizildi, sorun değil */ }
+
+  // şutçu
+  if (S.shooter && S.phase !== 'kickoff' && S.phase !== 'end'){
+    let sx = 380, sy = 1520, pose = 0;
+    if (S.phase==='intro'){ sx = 380; sy = 1520; }
+    else if (S.phase==='runup'){ const t = ease(S.t/DUR.runup); sx = lerp(380, 478, t); sy = lerp(1520, 1325, t); pose = Math.sin(S.t*22)*.5; }
+    else { sx = 478; sy = 1325; pose = S.phase==='shot' ? 1 - S.t/DUR.shot*.5 : 0; }
+    if (showBall) drawBall(bx, by, br, sh && sh.golden);
+    drawPerson(sx, sy, 1.75, S.turn, { pose, num: (S.taken[S.turn] % 11) + 7 });
+    // isim etiketi
+    const name = short(S.shooter.nick, 16);
+    ctx.font = `900 34px ${FONT}`;
+    const w = ctx.measureText(name).width + 50;
+    rr(sx - w/2, sy - 380, w, 54, 27); ctx.fillStyle = TEAMS[S.turn].color; ctx.fill();
+    txt(name, sx, sy - 352, 34, '#fff');
+  } else if (showBall){
+    drawBall(bx, by, br, false);
+  }
+}
+
+function drawHUD(now){
+  // skor tablosu
+  rr(40, 36, 1000, 236, 28); ctx.fillStyle = 'rgba(6,10,16,.82)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 2; ctx.stroke();
+  txt(`PENALTI DÜELLOSU  •  MAÇ ${S.match}`, 540, 72, 26, '#9fb3c8');
+  for (let i=0;i<2;i++){
+    const T = TEAMS[i], cx = i ? 800 : 280, al = i ? 'right' : 'left';
+    const edge = i ? 1010 : 70;
+    rr(i ? 590 : 70, 100, 420, 6, 3); ctx.fillStyle = T.color; ctx.fill();
+    txt(T.name, edge, 140, 40, '#fff', al);
+    txt(`${teamCount(i)} oyuncu`, edge, 180, 22, '#8fa1b3', al);
+    // geçmiş noktaları
+    const n = Math.max(CFG.shotsPerTeam, S.hist[i].length);
+    const show = n, startIdx = 0, gap = Math.min(36, 380/n), rad = Math.min(13, gap*.4);
+    for (let k=0;k<show;k++){
+      const idx = startIdx + k, v = S.hist[i][idx];
+      const dx = i ? 1010 - (show-1-k)*gap - 14 : 84 + k*gap;
+      ctx.beginPath(); ctx.arc(dx, 222, rad, 0, 6.283);
+      if (v === true){ ctx.fillStyle = '#3ddc84'; ctx.fill(); }
+      else if (v === false){ ctx.fillStyle = '#ff4d5e'; ctx.fill(); ctx.strokeStyle='#fff'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(dx-5,217); ctx.lineTo(dx+5,227); ctx.moveTo(dx+5,217); ctx.lineTo(dx-5,227); ctx.stroke(); }
+      else { ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.lineWidth = 3; ctx.stroke(); }
+    }
+  }
+  // skor
+  txt(`${S.score[0]}`, 470, 168, 92, TEAMS[0].light, 'center');
+  txt('-', 540, 164, 60, '#5d6d7e');
+  txt(`${S.score[1]}`, 610, 168, 92, TEAMS[1].light, 'center');
+  const sd = S.taken[0] >= CFG.shotsPerTeam && S.taken[1] >= CFG.shotsPerTeam;
+  if (sd){ txt('ALTIN GOL', 540, 236, 22, '#ffd23f'); }
+
+  // güç barları (kalenin iki yanında, dikey)
+  for (let i=0;i<2;i++){
+    const x = i ? 1000 : 44, top = 560, h = 400, w = 36;
+    rr(x, top, w, h, 18); ctx.fillStyle = 'rgba(6,10,16,.7)'; ctx.fill();
+    const v = S.power[i]/100, fh = Math.max(0, (h-8)*v);
+    if (fh > 1){ rr(x+4, top+4+(h-8-fh), w-8, fh, 14); const g = ctx.createLinearGradient(0,top+h,0,top); g.addColorStop(0,TEAMS[i].dark); g.addColorStop(1,TEAMS[i].light); ctx.fillStyle = g; ctx.fill(); }
+    txt(`${Math.round(S.power[i])}`, x + w/2, top + h + 30, 28, '#fff', 'center', 6);
+    ctx.save(); ctx.translate(x + w/2, top - 26); txt('GÜÇ', 0, 0, 20, '#cfd9e3', 'center', 5); ctx.restore();
+    if (S.golden[i]){ const pulse = 1 + Math.sin(now/150)*.12; ctx.save(); ctx.translate(x+w/2, top+h+80); ctx.scale(pulse,pulse); drawBall(0,0,24,true); ctx.restore(); }
+  }
+}
+
+function drawCenterText(now){
+  let main = null, sub = null, col = '#fff', t = S.t;
+  if (S.phase === 'kickoff'){ main = `MAÇ ${S.match}`; sub = 'BAŞLIYOR'; }
+  else if (S.phase === 'intro'){ sub = `${TEAMS[S.turn].name} ŞUTA HAZIRLANIYOR`; col = TEAMS[S.turn].light; }
+  else if (S.phase === 'result' && S.shot){
+    const o = S.shot.outcome;
+    main = o==='goal' ? (S.shot.golden ? 'ALTIN GOL!' : 'GOOOL!') : o==='save' ? 'KURTARDI!' : 'AUT!';
+    col = o==='goal' ? '#ffd23f' : '#ffffff';
+  }
+  else if (S.phase === 'end'){ main = `${TEAMS[S.winner].name}`; sub = 'KAZANDI!'; col = TEAMS[S.winner].light; }
+
+  if (main){
+    const sc = Math.min(1, t*5); const k = .6 + .4*(1 - Math.pow(1-sc,3)) + (S.phase==='result'?Math.sin(now/90)*.02:0);
+    ctx.save(); ctx.translate(540, 420); ctx.scale(k,k);
+    txt(main, 0, 0, main.length > 8 ? 110 : 140, col, 'center', 16);
+    ctx.restore();
+  }
+  if (sub){ txt(sub, 540, main ? 530 : 430, main ? 56 : 44, main ? '#fff' : col, 'center', 10); }
+  if (S.phase === 'end' && S.mvp){ txt(`MAÇIN YILDIZI: ${short(S.mvp,18)}`, 540, 600, 40, '#ffd23f', 'center', 9); }
+}
+
+function drawInfo(now){
+  // talimat kartı (TikTok sohbetinin üstünde görünür kalsın diye ortada)
+  const y = 1395;
+  rr(60, y, 960, 150, 26); ctx.fillStyle = 'rgba(6,10,16,.8)'; ctx.fill();
+  ctx.font = `900 34px ${FONT}`;
+  txt('Yoruma', 120, y+46, 34, '#fff', 'left');
+  rr(268, y+20, 70, 52, 12); ctx.fillStyle = TEAMS[0].color; ctx.fill(); txt('1', 303, y+47, 36, '#fff');
+  txt('KIRMIZI', 352, y+46, 34, TEAMS[0].light, 'left');
+  rr(560, y+20, 70, 52, 12); ctx.fillStyle = TEAMS[1].color; ctx.fill(); txt('2', 595, y+47, 36, '#fff');
+  txt('MAVİ   yaz, katıl!', 644, y+46, 34, TEAMS[1].light, 'left');
+  const tips = ['Hediye = şut gücü artar', `${CFG.goldenCoins}+ jeton = ALTIN TOP (kesin gol)`, 'Beğeni de güç verir'];
+  const tip = tips[Math.floor(now/3500) % tips.length];
+  txt(tip, 540, y+112, 32, '#ffd23f');
+
+  // akış + liderlik (alt kısım TikTok yorumlarının altında kalabilir, önemli değil)
+  let fy = 1580;
+  for (const f of S.feed.slice(0,4)){
+    const age = (performance.now() - f.t)/1000; const a = clamp(1 - (age-8)/2, 0, 1);
+    if (a <= 0) continue;
+    ctx.globalAlpha = a;
+    rr(60, fy, 600, 46, 23); ctx.fillStyle = 'rgba(6,10,16,.7)'; ctx.fill();
+    ctx.fillStyle = f.team==null ? '#999' : TEAMS[f.team].color; ctx.beginPath(); ctx.arc(86, fy+23, 9, 0, 6.283); ctx.fill();
+    txt(short(f.text, 34), 106, fy+24, 22, '#fff', 'left');
+    ctx.globalAlpha = 1; fy += 54;
+  }
+  const top = [...players.values()].filter(p => p.goals>0).sort((a,b) => b.goals-a.goals).slice(0,4);
+  rr(690, 1580, 330, 60 + Math.max(1,top.length)*44, 22); ctx.fillStyle = 'rgba(6,10,16,.7)'; ctx.fill();
+  txt('GOL KRALLARI', 855, 1610, 24, '#ffd23f');
+  if (!top.length) txt('henüz gol yok', 855, 1654, 22, '#8fa1b3');
+  top.forEach((p,i) => {
+    ctx.fillStyle = TEAMS[p.team].color; ctx.beginPath(); ctx.arc(716, 1654 + i*44, 8, 0, 6.283); ctx.fill();
+    txt(short(p.nick, 12), 734, 1655 + i*44, 22, '#fff', 'left');
+    txt(String(p.goals), 1000, 1655 + i*44, 24, '#fff', 'right');
+  });
+}
+
+function drawParticles(){
+  for (const q of S.particles){
+    ctx.save(); ctx.translate(q.x,q.y); ctx.rotate(q.r); ctx.globalAlpha = clamp(q.life,0,1);
+    ctx.fillStyle = q.c; ctx.fillRect(-q.w/2,-q.h/2,q.w,q.h); ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawConn(){
+  const st = !wsOpen ? ['TEST MODU','#ff9f43']
+    : ttState === 'connected' ? ['CANLI BAĞLI','#3ddc84']
+    : ttState === 'error' ? ['YAYIN BULUNAMADI','#ff5d6c'] : ["TİKTOK'A BAĞLANIYOR",'#ffd23f'];
+  if (CFG.obs && ttState === 'connected') return;
+  ctx.fillStyle = st[1];
+  ctx.beginPath(); ctx.arc(64, 300, 7, 0, 6.283); ctx.fill();
+  txt(st[0], 80, 301, 18, st[1], 'left');
+  if (SFX.locked && !CFG.obs){ txt('Ses için ekrana dokun', 1016, 301, 18, '#ffd23f', 'right'); }
+}
+
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(.05, (now - last)/1000); last = now;
+  update(dt);
+  ctx.setTransform(1,0,0,1,OX,0);
+  ctx.save();
+  if (S.shake){ ctx.translate(rnd(-S.shake,S.shake)*.6, rnd(-S.shake,S.shake)*.6); }
+  drawBackground(now);
+  drawGoal(now);
+  drawAction(now);
+  drawParticles();
+  ctx.restore();
+  if (S.flash){ ctx.fillStyle = `rgba(255,240,180,${S.flash*.25})`; ctx.fillRect(-OX,0,CW,H); }
+  drawHUD(now);
+  drawCenterText(now);
+  drawInfo(now);
+  drawConn();
+  ctx.setTransform(1,0,0,1,0,0);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---------------- köprü programına bağlantı ---------------- */
+let wsOpen = false, ttState = null, ttMsg = '';
+const panel = document.getElementById('panel'), wsStat = document.getElementById('wsStat');
+if (CFG.obs) panel.classList.add('hidden');
+function setStat(text, good){ wsStat.textContent = text; wsStat.classList.toggle('on', !!good); }
+function connectWS(){
+  let ws;
+  try { ws = new WebSocket(CFG.wsUrl); } catch(e){ setTimeout(connectWS, 5000); return; }
+  ws.onopen = () => { wsOpen = true; setStat('sunucuya bağlandı', false); };
+  ws.onmessage = m => {
+    let e; try { e = JSON.parse(m.data); } catch { return; }
+    if (e.type === 'status'){
+      const was = ttState; ttState = e.state; ttMsg = e.msg || '';
+      setStat(e.state === 'connected' ? 'TikTok bağlı' : e.state === 'error' ? 'yayın bulunamadı' : 'TikTok bağlanıyor', e.state === 'connected');
+      if (e.state === 'connected' && was !== 'connected'){ panel.classList.add('hidden'); toggleDemo(false); }
+      return;
+    }
+    try { handleEvent(e); } catch(err){ console.warn(err); }
+  };
+  ws.onclose = () => { if (wsOpen) setStat('bağlantı koptu', false); wsOpen = false; ttState = null; setTimeout(connectWS, 5000); };
+  ws.onerror = () => {};
+}
+connectWS();
+
+/* ---------------- iPad / telefon: ekran kapanmasın, sunucu uyumasın ---------------- */
+let wakeLock = null;
+async function keepAwake(){
+  try { if ('wakeLock' in navigator && !wakeLock){ wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch(e){}
+}
+['pointerdown','touchend','click'].forEach(ev => addEventListener(ev, () => { SFX.init(); keepAwake(); }, { passive:true }));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+keepAwake();
+if (location.protocol.startsWith('http')) setInterval(() => fetch('/ping', { cache:'no-store' }).catch(()=>{}), 4*60*1000);
+
+/* ---------------- test paneli ---------------- */
+const NAMES = ['ahmet','elif','mert','zeynep','emre','ayse','burak','selin','can','defne','kerem','ece','yusuf','irem','arda','nil','berk','duru','omer','asya'];
+const randUser = () => pick(NAMES) + Math.floor(rnd(1,99));
+function simUser(){ const v = document.getElementById('nick').value.trim(); return v || randUser(); }
+document.querySelectorAll('#panel [data-a]').forEach(b => b.onclick = () => {
+  const [type, a, c] = b.dataset.a.split('|'), user = simUser();
+  if (type === 'chat') handleEvent({ type, user, nick:user, text:a });
+  if (type === 'gift') handleEvent({ type, user, nick:user, gift:a, coins:+c, count:1 });
+  if (type === 'like') handleEvent({ type, user, nick:user, count:+a });
+  if (type === 'follow') handleEvent({ type, user, nick:user });
+});
+let demo = null;
+const demoBtn = document.getElementById('demoBtn');
+function toggleDemo(on){
+  if (demo){ clearInterval(demo); demo = null; }
+  if (on){
+    demo = setInterval(() => {
+      const r = Math.random(), known = [...players.keys()], user = (known.length > 3 && Math.random() < .7) ? pick(known) : randUser();
+      if (r < .35) handleEvent({ type:'chat', user, nick:user, text: pick(['1','2','katıl','gol!','hadi']) });
+      else if (r < .6) handleEvent({ type:'like', user, nick:user, count: Math.floor(rnd(5,30)) });
+      else if (r < .93) handleEvent({ type:'gift', user, nick:user, gift: pick(['Gül','Kalp','Parfüm']), coins: pick([1,1,1,5,20]), count: pick([1,1,3,5]) });
+      else if (r < .97) handleEvent({ type:'follow', user, nick:user });
+      else handleEvent({ type:'gift', user, nick:user, gift:'Büyük hediye', coins:100, count:1 });
+    }, 650);
+  }
+  demoBtn.classList.toggle('act', !!demo);
+}
+demoBtn.onclick = () => toggleDemo(!demo);
+if (new URLSearchParams(location.search).has('demo')) toggleDemo(true);
+document.getElementById('hideBtn').onclick = () => panel.classList.add('hidden');
+const sndBtn = document.getElementById('sndBtn');
+function toggleSound(){ const on = SFX.toggle(); sndBtn.textContent = `Ses: ${on ? 'AÇIK' : 'KAPALI'} (M)`; sndBtn.classList.toggle('act', on); }
+sndBtn.onclick = toggleSound;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'h' || e.key === 'H') panel.classList.toggle('hidden');
+  if (e.key === 'd' || e.key === 'D') toggleDemo(!demo);
+  if (e.key === 'm' || e.key === 'M') toggleSound();
+});
+</script>
+</body>
+</html>
